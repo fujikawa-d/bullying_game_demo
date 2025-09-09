@@ -181,16 +181,19 @@ def check_A_gate(state: GameState, task_id: int, history: dict, a_gate: dict):
         return False
     gate = a_gate.get(task_id)
     if gate is None:
-        gate = (random.random() < state.m)
-        a_gate[task_id] = gate
+        # この抽選は「抽選を開始」ボタン側で行う（r表示のため）
+        return None
     return gate
 
-def auto_pick(state: GameState, task_id: int, history: dict, a_gate: dict):
-    """自動選択（モンテカルロ用）"""
-    if check_A_gate(state, task_id, history, a_gate):
-        return 'A' if random.random() < state.m else 'B'
-    else:
+# 1) モンテカルロの自動選択を修正（mの二重掛けを排除）
+def auto_pick(state, task_id, history, a_gate):
+    dep_ok, _ = can_choose_A_by_dependency(task_id, history)
+    if not dep_ok:
         return 'B'
+    if task_id not in a_gate:
+        a_gate[task_id] = (random.random() < state.m)  # ← ここだけ m
+    return 'A' if a_gate[task_id] else 'B'            # ← 2回目の m を削除
+
 
 def run_one_game(seed=None, init_m=None):
     """モンテカルロ1ゲーム"""
@@ -203,6 +206,7 @@ def run_one_game(seed=None, init_m=None):
         task_id = next_available_task(stt)
         if task_id is None:
             break
+        # 自動でA/B
         choice = auto_pick(stt, task_id, history, a_gate)
         history[task_id] = choice
         ended = apply_choice(stt, task_id, choice, history)
@@ -235,6 +239,35 @@ st.markdown(
 )
 
 # =========================
+# ユーティリティ：新規ゲームの完全初期化
+# =========================
+def _hard_reset(m0: float):
+    new_state = GameState(m=m0, initial_m=m0)
+    new_state.t = 1; new_state.p = 0.3; new_state.s = 0.0
+    new_state.mode = 'normal'; new_state.last_choice = None; new_state.consecutive_A = 0
+    new_state.normal_pending = list(range(1, 12))
+    new_state.major_pending = list(range(12, 20))
+    new_state.log = []; new_state.just_entered_major = False
+    new_state.pending_task = None; new_state.pending_choice = None
+
+    st.session_state["state"] = new_state
+    st.session_state["history"] = {}
+    st.session_state["ended"] = False
+
+    # 抽選結果・直近乱数・実測値カウンタを確実に初期化
+    st.session_state["a_gate"] = {}
+    st.session_state["gate_last_r"] = {}
+    st.session_state["gate_stats"] = {"draws": 0, "success": 0}
+
+    # ボタンkeyの一意化用 run_id を増やす
+    st.session_state["run_id"] = st.session_state.get("run_id", 0) + 1
+
+    # ランダム抽選モードの一時値もリセット
+    st.session_state["_m_draw"] = None
+
+    st.rerun()
+
+# =========================
 # Sidebar（初期mのランダム抽選フローつき）
 # =========================
 with st.sidebar:
@@ -247,8 +280,8 @@ with st.sidebar:
         key="sidebar_init_mode_radio"
     )
 
+    # セッション変数の安全な初期確保
     if "state" not in st.session_state:
-        # ここでは仮置き。実開始時に正式初期化
         st.session_state["state"] = GameState(m=random.choice([0.3, 0.6, 0.9]), initial_m=0.6)
     if "history" not in st.session_state:
         st.session_state["history"] = {}
@@ -256,10 +289,12 @@ with st.sidebar:
         st.session_state["ended"] = False
     if "a_gate" not in st.session_state:
         st.session_state["a_gate"] = {}
-
-    state: GameState = st.session_state["state"]
-    history: dict = st.session_state["history"]
-    a_gate: dict = st.session_state["a_gate"]
+    if "gate_last_r" not in st.session_state:
+        st.session_state["gate_last_r"] = {}
+    if "gate_stats" not in st.session_state:
+        st.session_state["gate_stats"] = {"draws": 0, "success": 0}
+    if "run_id" not in st.session_state:
+        st.session_state["run_id"] = 0
 
     if init_mode == "ランダム(0.9/0.6/0.3)":
         st.info(
@@ -276,19 +311,7 @@ with st.sidebar:
             m0 = st.session_state["_m_draw"]
             st.success(f"mは {m0:.1f} となりました。現在、学校が法に沿った適切な選択(A)をできる確率は **{int(m0*100)}%** です。")
             if st.button("この組織風土でゲームを開始", key="btn_start_random"):
-                new_state = GameState(m=m0, initial_m=m0)
-                new_state.t = 1; new_state.p = 0.3; new_state.s = 0.0
-                new_state.mode = 'normal'; new_state.last_choice = None; new_state.consecutive_A = 0
-                new_state.normal_pending = list(range(1, 12))
-                new_state.major_pending = list(range(12, 20))
-                new_state.log = []; new_state.just_entered_major = False
-                new_state.pending_task = None; new_state.pending_choice = None
-                st.session_state["state"] = new_state
-                st.session_state["history"] = {}
-                st.session_state["ended"] = False
-                st.session_state["a_gate"] = {}
-                st.session_state["_m_draw"] = None
-                st.rerun()
+                _hard_reset(m0)
     else:
         init_m = st.select_slider(
             "初期m",
@@ -297,43 +320,32 @@ with st.sidebar:
             key="sidebar_init_m_slider"
         )
         if st.button("新しいゲームを開始", key="btn_start_manual"):
-            m0 = init_m
-            new_state = GameState(m=m0, initial_m=m0)
-            new_state.t = 1; new_state.p = 0.3; new_state.s = 0.0
-            new_state.mode = 'normal'; new_state.last_choice = None; new_state.consecutive_A = 0
-            new_state.normal_pending = list(range(1,12))
-            new_state.major_pending = list(range(12,20))
-            new_state.log = []; new_state.just_entered_major = False
-            new_state.pending_task = None; new_state.pending_choice = None
-            st.session_state["state"] = new_state
-            st.session_state["history"] = {}
-            st.session_state["ended"] = False
-            st.session_state["a_gate"] = {}
-            st.rerun()
+            _hard_reset(float(init_m))
 
-# 参照（再掲：以降はこれを使用）
+# 参照（以降はこのエイリアスを使用）
 state: GameState = st.session_state["state"]
 history: dict = st.session_state["history"]
 a_gate: dict = st.session_state["a_gate"]
+run_id: int = st.session_state.get("run_id", 0)
 
 # =========================
 # モンテカルロ（常時表示）
 # =========================
 st.markdown("---")
 with st.expander("モンテカルロ試行", expanded=False):
-    trials = st.slider("試行回数", 10, 2000, 500, step=10, key="mc_trials_slider")
+    trials = st.slider("試行回数", 10, 2000, 500, step=10, key=f"mc_trials_slider_{run_id}")
     init_m_opt = st.selectbox(
         "初期mの固定",
         ["固定しない(ランダム)", 0.3, 0.6, 0.9],
         index=0,
-        key="mc_init_m_selectbox"
+        key=f"mc_init_m_selectbox_{run_id}"
     )
-    seed = st.number_input("乱数シード（任意）", value=0, step=1, key="mc_seed_input")
-    if st.button("試行を実行", key="mc_run_button"):
+    seed = st.number_input("乱数シード（任意）", value=0, step=1, key=f"mc_seed_input_{run_id}")
+    if st.button("試行を実行", key=f"mc_run_button_{run_id}"):
         results = []
         for i in range(trials):
             res = run_one_game(
-                seed=seed + i,
+                seed=int(seed) + i,
                 init_m=None if init_m_opt == "固定しない(ランダム)" else float(init_m_opt)
             )
             results.append(res)
@@ -407,10 +419,7 @@ with col2:
             st.session_state["ended"] = True
         else:
             # 課題番号（A-* or B-*）
-            if task_id <= 11:
-                code = f"A-{task_id}"
-            else:
-                code = f"B-{task_id-11}"
+            code = f"A-{task_id}" if task_id <= 11 else f"B-{task_id-11}"
             st.markdown(f"**課題{code}**：{TASK_LABELS[task_id]}")
             a_text, b_text = TASK_CHOICES.get(task_id, ("A", "B"))
             st.write(a_text)
@@ -423,38 +432,60 @@ with col2:
             if not dep_ok:
                 st.warning(f"過去の対応の欠落により、この課題ではAは選択できません（理由：{dep_reason}）。Bを選んでください。")
             else:
-                # A選択可否の抽選
+                # A選択可否の抽選（未抽選なら実行）
                 if gate is None:
                     st.caption("それでは組織風土（A選択確率）に基づき、Aが選べるか抽選します。『抽選を開始』を押してください。")
-                    if st.button("抽選を開始", key=f"draw_{task_id}"):
-                        with st.spinner("抽選中..."):
-                            import time; time.sleep(1.0)
-                        gate = (random.random() < state.m)
+                    if st.button("抽選を開始", key=f"draw_{task_id}_{run_id}"):
+                        r = random.random()
+                        gate = (r < state.m)
                         a_gate[task_id] = gate
+
+                        # 乱数と実測率の記録
+                        st.session_state["gate_last_r"][task_id] = r
+                        st.session_state["gate_stats"]["draws"] += 1
+                        if gate:
+                            st.session_state["gate_stats"]["success"] += 1
                         st.rerun()
-                if gate is not None:  # 抽選結果の説明
+
+                # 抽選結果の説明
+                if gate is not None:
                     prob = int(state.m * 100)
                     if gate:
                         st.info(f"選択確率{prob}%で抽選した結果、**Aの選択が可能**となりました。どちらを選びますか？")
                     else:
                         st.warning(f"選択確率{prob}%で抽選した結果、**Aの選択はできない**こととなりました。**Bを選んでください。**")
 
+                    # 今回の乱数と実測値
+                    r_shown = st.session_state.get("gate_last_r", {}).get(task_id)
+                    if r_shown is not None:
+                        st.caption(f"【今回の乱数 r】{r_shown:.3f} ／ 【判定基準】r < m (= {state.m:.3f}) → {'A可' if gate else 'A不可'}")
+                    g = st.session_state.get("gate_stats", {"draws": 0, "success": 0})
+                    emp = (g["success"] / g["draws"] * 100) if g["draws"] else 0.0
+                    st.caption(f"【A抽選 実測値】 {g['success']} / {g['draws']}（{emp:.1f}%）｜【理論値】{state.m*100:.0f}%")
+
+                    # 検証用：同課題で再抽選したいとき（未確定の間だけ）
+                    if state.pending_task is None and state.pending_choice is None:
+                        if st.button("再抽選（検証用）", key=f"redraw_{task_id}_{run_id}"):
+                            a_gate.pop(task_id, None)
+                            st.session_state["gate_last_r"].pop(task_id, None)
+                            st.rerun()
+
             # プレビュー＆確定
             allow_A = dep_ok and bool(gate)
             if allow_A:
                 c1, c2 = st.columns(2)
                 with c1:
-                    if st.button("Aを選ぶ（プレビュー）", key=f"prev_A_{task_id}"):
+                    if st.button("Aを選ぶ（プレビュー）", key=f"prev_A_{task_id}_{run_id}"):
                         state.pending_task = task_id
                         state.pending_choice = 'A'
                         st.rerun()
                 with c2:
-                    if st.button("Bを選ぶ（プレビュー）", key=f"prev_B_{task_id}"):
+                    if st.button("Bを選ぶ（プレビュー）", key=f"prev_B_{task_id}_{run_id}"):
                         state.pending_task = task_id
                         state.pending_choice = 'B'
                         st.rerun()
             else:
-                if st.button("Bを選ぶ（プレビュー）", key=f"prev_B_only_{task_id}"):
+                if st.button("Bを選ぶ（プレビュー）", key=f"prev_B_only_{task_id}_{run_id}"):
                     state.pending_task = task_id
                     state.pending_choice = 'B'
                     st.rerun()
@@ -484,7 +515,7 @@ with col2:
                 if allow_A:
                     c_ok, c_cancel = st.columns(2)
                     with c_ok:
-                        if st.button("この内容で確定", key=f"commit_{task_id}"):
+                        if st.button("この内容で確定", key=f"commit_{task_id}_{run_id}"):
                             choice = state.pending_choice
                             state.pending_choice = None
                             state.pending_task = None
@@ -500,12 +531,12 @@ with col2:
                                 st.session_state["ended"] = True
                             st.rerun()
                     with c_cancel:
-                        if st.button("やっぱり選び直す", key=f"cancel_{task_id}"):
+                        if st.button("やっぱり選び直す", key=f"cancel_{task_id}_{run_id}"):
                             state.pending_choice = None
                             state.pending_task = None
                             st.rerun()
                 else:
-                    if st.button("この内容で確定", key=f"commit_onlyB_{task_id}"):
+                    if st.button("この内容で確定", key=f"commit_onlyB_{task_id}_{run_id}"):
                         choice = state.pending_choice
                         state.pending_choice = None
                         state.pending_task = None
